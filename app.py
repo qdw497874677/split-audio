@@ -59,17 +59,12 @@ def process_audio_split(
         if not chunks:
             raise ValueError("Could not split the audio file. The file might be too short.")
 
-        # Create a zip file with the chunks
-        zip_filename = f"split_audio_{uuid.uuid4().hex}.zip"
-        zip_path = os.path.join(temp_dir, zip_filename)
-        with zipfile.ZipFile(zip_path, 'w') as zipf:
-            for chunk_file in chunks:
-                zipf.write(chunk_file, os.path.basename(chunk_file))
-
+        # The result is the list of chunk files
+        chunk_filenames = [os.path.basename(p) for p in chunks]
         tasks[task_id] = {
             "status": "completed",
-            "result_path": zip_path,
-            "result_filename": f"split_{os.path.splitext(original_filename)[0]}.zip"
+            "files": chunk_filenames,
+            "task_dir": temp_dir
         }
 
     except Exception as e:
@@ -127,33 +122,45 @@ async def get_task_status(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
     return task
 
-@app.get("/tasks/{task_id}/download")
-async def download_result(task_id: str, background_tasks: BackgroundTasks):
+@app.get("/downloads/{task_id}/{filename}")
+async def download_chunk(task_id: str, filename: str):
     task = tasks.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+
+    if task.get("status") != "completed":
+        raise HTTPException(status_code=400, detail="Task is not yet completed.")
+
+    task_dir = task.get("task_dir")
+    if not task_dir:
+        raise HTTPException(status_code=404, detail="Task directory not found.")
+
+    file_path = os.path.join(task_dir, filename)
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found.")
+
+    return FileResponse(path=file_path, filename=filename)
+
+@app.delete("/tasks/{task_id}", status_code=204)
+async def delete_task_data(task_id: str):
+    """
+    Deletes the data associated with a completed task to free up space.
+    """
+    task = tasks.get(task_id)
+    if not task:
+        # Return 204 even if not found to make the operation idempotent.
+        return
+
+    # Remove from in-memory task list
+    tasks.pop(task_id, None)
+
+    # Remove the task directory from the filesystem
+    task_dir = os.path.join(UPLOADS_DIR, f"task_{task_id}")
+    if os.path.exists(task_dir):
+        shutil.rmtree(task_dir, ignore_errors=True)
     
-    if task["status"] != "completed":
-        return JSONResponse(
-            status_code=400,
-            content={"status": task["status"], "message": "Task is not yet completed."}
-        )
-
-    result_path = task.get("result_path")
-    result_filename = task.get("result_filename")
-    
-    if not result_path or not os.path.exists(result_path):
-        raise HTTPException(status_code=404, detail="Result file not found.")
-
-    # Clean up the temp directory in the background after the response is sent
-    temp_dir = os.path.dirname(result_path)
-    background_tasks.add_task(shutil.rmtree, temp_dir, ignore_errors=True)
-
-    return FileResponse(
-        path=result_path,
-        media_type='application/zip',
-        filename=result_filename
-    )
+    return
 
 @app.get("/")
 def read_root():

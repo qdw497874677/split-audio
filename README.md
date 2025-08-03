@@ -6,7 +6,7 @@
 
 -   **异步处理**: 上传音频文件后，服务会立即返回一个任务ID，并在后台进行切分处理，不会阻塞请求。
 -   **任务状态查询**: 可以随时通过任务ID查询音频切分的进度（如：处理中、已完成、失败）。
--   **结果下载**: 任务成功后，可以通过专有链接下载包含所有音频片段的ZIP压缩包。
+-   **结果下载**: 任务成功后，会返回所有切分后音频片段的文件名列表，您可以根据需要单独下载每一个文件。
 -   **自定义参数**:
     -   可自定义每个分片的最大时长（分钟）。
     -   可自定义分片间的重叠时长（秒）。
@@ -75,17 +75,33 @@
     ```
 
 2.  **运行Docker容器**:
-    使用以下命令从镜像启动一个容器：
+    使用以下命令从镜像启动一个容器。我们强烈建议您将容器内的 `/app/uploads` 目录挂载到宿主机的一个目录上，以便永久保存处理完的文件。
+
     ```bash
-    docker run -d -p 8000:8000 --name audio-splitter-container audio-splitter
+    docker run -d -p 8000:8000 \
+      -v /path/on/your/host:/app/uploads \
+      --name audio-splitter-container \
+      audio-splitter
     ```
     -   `-d`: 在后台运行容器。
     -   `-p 8000:8000`: 将主机的8000端口映射到容器的8000端口。
+    -   `-v /path/on/your/host:/app/uploads`: **(重要)** 将您宿主机上的一个目录（例如 `/home/user/audio_files`）挂载到容器内的 `/app/uploads` 目录。**请务必将 `/path/on/your/host` 替换为您自己服务器上的真实路径。**
     -   `--name`: 为容器指定一个名称。
 
     服务将在 `http://localhost:8000` 上运行。
 
-例子：docker run -d -p 18001:8000 --name audio-splitter-container audio-splitter
+**例子**：
+```bash
+# 创建一个用于存储文件的本地目录
+mkdir -p /services/audio-splitter-data
+
+# 运行容器，并将本地目录挂载
+docker run -d -p 18001:8000 \
+  -v /services/audio-splitter-data:/app/uploads \
+  --name audio-splitter-container \
+  audio-splitter
+```
+此设置可确保即使容器被删除或重建，您的所有音频文件和处理结果都将保留在宿主机的 `/services/audio-splitter-data` 目录中。
 
 
 ---
@@ -150,8 +166,12 @@ curl -X GET "http://localhost:8000/tasks/a1b2c3d4-e5f6-7890-1234-567890abcdef"
     ```json
     {
       "status": "completed",
-      "result_path": "uploads/task_a1b2c3d4-e5f6-7890-1234-567890abcdef/split_audio_....zip",
-      "result_filename": "split_my_long_audio.zip"
+      "files": [
+        "chunk_1.mp3",
+        "chunk_2.mp3",
+        "chunk_3.mp3"
+      ],
+      "task_dir": "uploads/task_a1b2c3d4-e5f6-7890-1234-567890abcdef"
     }
     ```
 -   **处理失败**:
@@ -167,13 +187,29 @@ curl -X GET "http://localhost:8000/tasks/a1b2c3d4-e5f6-7890-1234-567890abcdef"
 
 ### 第3步：下载结果文件
 
-一旦任务状态变为 `completed`，您就可以使用 `GET /tasks/{task_id}/download` 端点来下载包含所有音频片段的ZIP文件。
+一旦任务状态变为 `completed`，您就可以根据上一步返回的 `files` 列表，使用 `GET /downloads/{task_id}/{filename}` 端点来下载您需要的任意一个音频片段。
+
+**`curl` 示例**:
+假设您想下载列表中的第一个文件 `chunk_1.mp3`：
+
+```bash
+curl -X GET "http://localhost:8000/downloads/a1b2c3d4-e5f6-7890-1234-567890abcdef/chunk_1.mp3" \
+     -o "chunk_1.mp3"
+```
+
+此命令会将指定的音频片段保存到本地。您可以对列表中的任何文件重复此操作。所有文件都会**保留**在服务器上，直到您手动删除整个任务。
+
+---
+
+### 第4步（可选）：清理任务数据
+
+为了释放服务器存储空间，当您确认不再需要某个任务的数据后，可以使用 `DELETE /tasks/{task_id}` 端点将其从服务器上删除。
 
 **`curl` 示例**:
 
 ```bash
-curl -X GET "http://localhost:8000/tasks/a1b2c3d4-e5f6-7890-1234-567890abcdef/download" \
-     -o "output.zip"
+curl -X DELETE "http://localhost:8000/tasks/a1b2c3d4-e5f6-7890-1234-567890abcdef"
 ```
 
-此命令会将结果保存为当前目录下的 `output.zip` 文件。
+**成功响应**:
+此请求成功后不会返回任何内容，HTTP状态码为 `204 No Content`。该任务的所有相关文件（包括上传的源文件和生成的ZIP包）都将被删除。
